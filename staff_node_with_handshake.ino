@@ -7,6 +7,8 @@
 #include <WiFi.h>
 #include <vector>
 #include <algorithm>
+#include <map>
+#include <queue>
 #include "SharedQueue.h"
 
 #define RST_PIN  5
@@ -19,13 +21,6 @@ Preferences preferences;
 SharedQueue sharedQueue("rfid-patients");
 
 // ========================== STRUCTURES ==========================
-struct QueueItem {
-  char uid[20];
-  char timestamp[25];
-  int number;
-  bool removeFromQueue;
-};
-
 struct SyncRequest {
   char type[10]; // "SYNC_REQ"
 };
@@ -55,14 +50,14 @@ std::map<String, QueueItem> queueMap;
 std::queue<String> patientOrder;
 
 // ========================== CALLBACKS ==========================
-void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len) {
+void onDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
   if (len == sizeof(SyncRequest)) {
     SyncRequest req;
     memcpy(&req, incomingData, sizeof(req));
     if (strcmp(req.type, "SYNC_REQ") == 0) {
       Serial.println("🔄 Received sync request.");
       for (auto& entry : queueMap) {
-        esp_now_send(info->src_addr, (uint8_t*)&entry.second, sizeof(QueueItem));
+        esp_now_send(mac, (uint8_t*)&entry.second, sizeof(QueueItem));
       }
       return;
     }
