@@ -1,0 +1,135 @@
+#include <esp_now.h>
+#include <WiFi.h>
+#include <esp_wifi.h>
+#include <SPI.h>
+#include <MFRC522.h>
+
+// RFID Pins
+#define GREEN_LED_PIN 15
+#define RED_LED_PIN   2
+#define RST_PIN       5
+#define SS_PIN        4
+
+MFRC522 mfrc522(SS_PIN, RST_PIN);
+
+// MAC addresses
+uint8_t arrivalMAC[] = {0xA4, 0xCF, 0x12, 0xF1, 0x6B, 0xA5};  // Change to actual Arrival node MAC
+uint8_t displayMAC[] = {0x68, 0xC6, 0x3A, 0xFC, 0x61, 0x3E};  // Change to actual Display node MAC
+
+// Queue item structure
+struct QueueItem {
+  char uid[20];
+  char timestamp[25];
+  int number;
+  bool removeFromQueue;
+};
+
+QueueItem currentPatient;
+bool hasPatient = false;
+
+// Request structure
+struct NextRequest {
+  char type[10];  // "NEXT_REQ"
+};
+
+String getUIDString(byte *buffer, byte bufferSize);
+void blinkLED(int pin);
+void requestNextPatient();
+
+void setup() {
+  Serial.begin(115200);
+  SPI.begin();
+  mfrc522.PCD_Init();
+
+  pinMode(GREEN_LED_PIN, OUTPUT);
+  pinMode(RED_LED_PIN, OUTPUT);
+  digitalWrite(GREEN_LED_PIN, HIGH);
+  digitalWrite(RED_LED_PIN, HIGH);
+
+  WiFi.mode(WIFI_STA);
+  Serial.print("WiFi MAC Address: ");
+  Serial.println(WiFi.macAddress());
+
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_promiscuous(false);
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("❌ ESP-NOW Init Failed");
+    return;
+  }
+
+  esp_now_register_recv_cb(onDataRecv);
+
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, arrivalMAC, 6);
+  peerInfo.channel = 1;
+  peerInfo.encrypt = false;
+  esp_now_add_peer(&peerInfo);
+
+  memcpy(peerInfo.peer_addr, displayMAC, 6);
+  esp_now_add_peer(&peerInfo);
+
+  Serial.println("👨‍⚕️ Doctor Node Ready");
+
+  requestNextPatient(); // Initial patient request
+}
+
+void loop() {
+  if (!hasPatient) return;
+
+  if (!mfrc522.PICC_IsNewCardPresent() || !mfrc522.PICC_ReadCardSerial()) return;
+
+  String scannedUID = getUIDString(mfrc522.uid.uidByte, mfrc522.uid.size);
+
+  if (scannedUID == String(currentPatient.uid)) {
+    Serial.printf("✅ Attended: %d | UID: %s\n", currentPatient.number, currentPatient.uid);
+
+    currentPatient.removeFromQueue = true;
+    esp_now_send(arrivalMAC, (uint8_t*)&currentPatient, sizeof(currentPatient));
+
+    hasPatient = false;
+    blinkLED(GREEN_LED_PIN);
+    requestNextPatient();
+  } else {
+    Serial.println("❌ Access Denied");
+    blinkLED(RED_LED_PIN);
+  }
+
+  mfrc522.PICC_HaltA();
+  mfrc522.PCD_StopCrypto1();
+  delay(1500);
+}
+
+void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len) {
+  if (len == sizeof(QueueItem)) {
+    memcpy(&currentPatient, incomingData, sizeof(QueueItem));
+    hasPatient = true;
+
+    Serial.printf("🔔 Next Patient Received: %d | UID: %s\n", currentPatient.number, currentPatient.uid);
+    esp_now_send(displayMAC, (uint8_t*)&currentPatient.number, sizeof(currentPatient.number));
+  }
+}
+
+void requestNextPatient() {
+  NextRequest req;
+  strcpy(req.type, "NEXT_REQ");
+  esp_now_send(arrivalMAC, (uint8_t*)&req, sizeof(req));
+  Serial.println("📩 Requested next patient from Arrival node.");
+}
+
+String getUIDString(byte *buffer, byte bufferSize) {
+  String uid = "";
+  for (byte i = 0; i < bufferSize; i++) {
+    if (buffer[i] < 0x10) uid += "0";
+    uid += String(buffer[i], HEX);
+  }
+  uid.toUpperCase();
+  return uid;
+}
+
+void blinkLED(int pin) {
+  digitalWrite(pin, LOW);
+  delay(1000);
+  digitalWrite(pin, HIGH);
+}
